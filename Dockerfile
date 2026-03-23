@@ -9,6 +9,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+RUN mkdir -p ./models && \
+    cp fusion_model.pkl ./models/fusion_model.pkl && \
+    cp scaler.pkl ./models/scaler.pkl && \
+    cp char_to_idx.pkl ./models/char_to_idx.pkl
+
 EXPOSE 10000
 
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "10000"]

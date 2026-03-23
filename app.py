@@ -4,7 +4,6 @@ import time
 import pickle
 import zipfile
 import shutil
-import urllib.request
 import requests
 from urllib.parse import urlparse
 from datetime import datetime
@@ -71,8 +70,10 @@ scan_history   = []
 # ── CNN Architecture ───────────────────────────────────
 class PhishingCNN(nn.Module):
     def __init__(self, vocab_size=None, embed_dim=128, num_filters=128,
-                 filter_sizes=[2, 3, 4, 5], num_classes=2, dropout=0.5):
+                 filter_sizes=None, num_classes=2, dropout=0.5):
         super().__init__()
+        if filter_sizes is None:
+            filter_sizes = [2, 3, 4, 5]
         vs = vocab_size or VOCAB_SIZE
         self.embedding  = nn.Embedding(vs, embed_dim, padding_idx=0)
         self.convs      = nn.ModuleList([
@@ -127,7 +128,7 @@ try:
             return self.cls(x)
 
     GNN_AVAILABLE = True
-    print("GNN available.")
+    print("GNN architecture loaded.")
 except Exception as e:
     print(f"GNN not available: {e}")
 
@@ -160,7 +161,7 @@ def extract_domain_name(url):
         parsed = urlparse(url if url.startswith("http") else "http://" + url)
         parts  = parsed.netloc.split(".")
         return ".".join(parts[-2:]) if len(parts) >= 2 else parsed.netloc
-    except:
+    except Exception:
         return url
 
 
@@ -169,7 +170,7 @@ def extract_features(url):
     try:
         parsed = urlparse(url if url.startswith("http") else "http://" + url)
         domain, path, query = parsed.netloc, parsed.path, parsed.query
-    except:
+    except Exception:
         domain, path, query = url, "", ""
 
     td = min_typo_distance(domain)
@@ -228,33 +229,30 @@ def analyze_extra(url):
     }
 
 
-# ── Google Drive Download with Large File Support ──────
+# ── Google Drive Download ──────────────────────────────
 def download_from_drive(file_id, dest_path):
     if os.path.exists(dest_path):
         size = os.path.getsize(dest_path)
         if size > 1024 * 1024:
-            print(f"Already exists: {dest_path} ({size/1024/1024:.1f} MB)")
+            print(f"Already exists : {dest_path} ({size/1024/1024:.1f} MB)")
             return True
         else:
-            print(f"File too small, re-downloading: {dest_path}")
+            print(f"File too small, removing and re-downloading : {dest_path}")
             os.remove(dest_path)
 
-    print(f"Downloading {dest_path}...")
+    print(f"Downloading : {dest_path}")
 
-    session = requests.Session()
-
-    # Try new Google Drive usercontent URL first (works best for large files)
     urls_to_try = [
         f"https://drive.usercontent.google.com/download?id={file_id}&export=download&confirm=t",
         f"https://drive.google.com/uc?export=download&id={file_id}&confirm=t",
-        f"https://drive.google.com/uc?export=download&id={file_id}",
     ]
+
+    session = requests.Session()
 
     for url in urls_to_try:
         try:
-            resp = session.get(url, stream=True, timeout=300)
+            resp = session.get(url, stream=True, timeout=600)
 
-            # Check for Google confirmation token
             token = None
             for key, value in resp.cookies.items():
                 if key.startswith("download_warning"):
@@ -262,51 +260,54 @@ def download_from_drive(file_id, dest_path):
                     break
 
             if token:
-                confirm_url = f"https://drive.google.com/uc?export=download&id={file_id}&confirm={token}"
-                resp        = session.get(confirm_url, stream=True, timeout=300)
+                url  = f"https://drive.google.com/uc?export=download&id={file_id}&confirm={token}"
+                resp = session.get(url, stream=True, timeout=600)
 
-            if resp.status_code == 200:
-                with open(dest_path, "wb") as f:
-                    downloaded = 0
-                    for chunk in resp.iter_content(chunk_size=1024 * 1024):
-                        if chunk:
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                            if downloaded % (50 * 1024 * 1024) == 0:
-                                print(f"  Progress: {downloaded/1024/1024:.0f} MB downloaded...")
+            if resp.status_code != 200:
+                print(f"  Status {resp.status_code} from {url}. Trying next...")
+                continue
 
-                size = os.path.getsize(dest_path)
-                print(f"Downloaded: {dest_path} ({size/1024/1024:.1f} MB)")
+            with open(dest_path, "wb") as f:
+                downloaded = 0
+                for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if downloaded % (50 * 1024 * 1024) == 0:
+                            print(f"  Progress : {downloaded/1024/1024:.0f} MB")
 
-                if size < 1024 * 100:
-                    print(f"WARNING: File too small ({size} bytes). Trying next URL...")
-                    os.remove(dest_path)
-                    continue
+            size = os.path.getsize(dest_path)
+            print(f"  Downloaded : {size/1024/1024:.1f} MB")
 
-                return True
+            if size < 100 * 1024:
+                print(f"  WARNING : File too small ({size} bytes). Trying next URL...")
+                os.remove(dest_path)
+                continue
+
+            return True
 
         except Exception as e:
-            print(f"URL failed: {url} - {e}")
+            print(f"  Error : {e}")
             if os.path.exists(dest_path):
                 os.remove(dest_path)
             continue
 
-    print(f"ERROR: All download attempts failed for {dest_path}")
+    print(f"  FAILED : Could not download {dest_path}")
     return False
 
 
 # ── Model Extraction ───────────────────────────────────
-def extract_transformer(zip_path, target_path):
-    if os.path.exists(f"{target_path}/config.json"):
-        print(f"Already extracted: {target_path}")
+def extract_transformer_zip(zip_path, target_path):
+    if os.path.exists(os.path.join(target_path, "config.json")):
+        print(f"Already extracted : {target_path}")
         return True
 
     if not os.path.exists(zip_path):
-        print(f"WARNING: {zip_path} not found")
+        print(f"Zip not found : {zip_path}")
         return False
 
-    print(f"Extracting {zip_path}...")
-    tmp = f"/tmp/ext_{os.path.basename(target_path)}"
+    print(f"Extracting {zip_path} to {target_path}...")
+    tmp = f"/tmp/extract_{os.path.basename(target_path)}"
 
     try:
         with zipfile.ZipFile(zip_path, "r") as z:
@@ -317,33 +318,35 @@ def extract_transformer(zip_path, target_path):
                 if os.path.exists(target_path):
                     shutil.rmtree(target_path)
                 shutil.copytree(root, target_path)
-                print(f"Extracted to: {target_path}")
+                print(f"  Extracted successfully to {target_path}")
                 return True
 
-        print(f"ERROR: Could not find model files in zip")
+        print(f"  ERROR : model files not found inside zip")
         return False
 
     except zipfile.BadZipFile:
-        print(f"ERROR: {zip_path} is not a valid zip file. Re-downloading...")
+        print(f"  ERROR : {zip_path} is not a valid zip. Will re-download next time.")
         os.remove(zip_path)
+        if os.path.exists(tmp):
+            shutil.rmtree(tmp)
         return False
     except Exception as e:
-        print(f"ERROR extracting {zip_path}: {e}")
+        print(f"  ERROR extracting : {e}")
         return False
 
 
-def extract_pt(zip_path, pt_path):
+def extract_pt_zip(zip_path, pt_path):
     if os.path.exists(pt_path):
-        print(f"Already extracted: {pt_path}")
+        print(f"Already extracted : {pt_path}")
         return True
 
     if not os.path.exists(zip_path):
-        print(f"WARNING: {zip_path} not found")
+        print(f"Zip not found : {zip_path}")
         return False
 
     print(f"Extracting {zip_path}...")
     pt_name = os.path.basename(pt_path)
-    tmp     = f"/tmp/ext_{pt_name}"
+    tmp     = f"/tmp/extract_{pt_name}"
     os.makedirs(tmp, exist_ok=True)
 
     try:
@@ -352,129 +355,177 @@ def extract_pt(zip_path, pt_path):
 
         for root, dirs, files in os.walk(tmp):
             if pt_name in files:
-                shutil.copy(f"{root}/{pt_name}", pt_path)
-                print(f"Extracted to: {pt_path}")
+                shutil.copy(os.path.join(root, pt_name), pt_path)
+                print(f"  Extracted {pt_name} to {pt_path}")
                 return True
 
-        print(f"ERROR: {pt_name} not found in zip")
+        print(f"  ERROR : {pt_name} not found inside zip")
         return False
 
     except zipfile.BadZipFile:
-        print(f"ERROR: {zip_path} is not a valid zip file. Re-downloading...")
+        print(f"  ERROR : {zip_path} is not a valid zip. Will re-download next time.")
         os.remove(zip_path)
         return False
     except Exception as e:
-        print(f"ERROR extracting {zip_path}: {e}")
+        print(f"  ERROR extracting : {e}")
         return False
 
 
-# ── Model Setup ────────────────────────────────────────
+# ── Setup All Models ───────────────────────────────────
 def setup_models():
+    print("=" * 50)
+    print("Starting model setup...")
+    print("=" * 50)
+
     os.makedirs("./models/bert",    exist_ok=True)
     os.makedirs("./models/roberta", exist_ok=True)
 
-    file_ids = {
-        "bert_model.zip"    : os.getenv("BERT_FILE_ID",    ""),
-        "roberta_model.zip" : os.getenv("ROBERTA_FILE_ID", ""),
-        "cnn_model.zip"     : os.getenv("CNN_FILE_ID",     ""),
-        "gnn_model.zip"     : os.getenv("GNN_FILE_ID",     ""),
-    }
+    bert_id    = os.getenv("BERT_FILE_ID",    "")
+    roberta_id = os.getenv("ROBERTA_FILE_ID", "")
+    cnn_id     = os.getenv("CNN_FILE_ID",     "")
+    gnn_id     = os.getenv("GNN_FILE_ID",     "")
 
-    print("Starting model download and setup...")
+    # Download BERT
+    if bert_id:
+        ok = download_from_drive(bert_id, "./models/bert_model.zip")
+        if ok:
+            extract_transformer_zip("./models/bert_model.zip", "./models/bert")
+    else:
+        print("WARNING : BERT_FILE_ID not set")
 
-    for filename, file_id in file_ids.items():
-        if not file_id:
-            print(f"WARNING: No file ID for {filename}")
-            continue
+    # Download RoBERTa
+    if roberta_id:
+        ok = download_from_drive(roberta_id, "./models/roberta_model.zip")
+        if ok:
+            extract_transformer_zip("./models/roberta_model.zip", "./models/roberta")
+    else:
+        print("WARNING : ROBERTA_FILE_ID not set")
 
-        dest = f"./models/{filename}"
+    # Download CNN
+    if cnn_id:
+        ok = download_from_drive(cnn_id, "./models/cnn_model.zip")
+        if ok:
+            extract_pt_zip("./models/cnn_model.zip", "./models/cnn_best.pt")
+    else:
+        print("WARNING : CNN_FILE_ID not set")
 
-        # Download the file
-        success = download_from_drive(file_id, dest)
-        if not success:
-            print(f"FAILED to download {filename}")
-            continue
+    # Download GNN
+    if gnn_id:
+        ok = download_from_drive(gnn_id, "./models/gnn_model.zip")
+        if ok:
+            extract_pt_zip("./models/gnn_model.zip", "./models/gnn_best.pt")
+    else:
+        print("WARNING : GNN_FILE_ID not set")
 
-        # Extract based on type
-        if "bert" in filename:
-            extract_transformer(dest, "./models/bert")
-        elif "roberta" in filename:
-            extract_transformer(dest, "./models/roberta")
-        elif "cnn" in filename:
-            extract_pt(dest, "./models/cnn_best.pt")
-        elif "gnn" in filename:
-            extract_pt(dest, "./models/gnn_best.pt")
-
+    print("=" * 50)
     print("Model setup complete.")
-    print("Models folder:", os.listdir("./models"))
+    print("Models folder contents :", os.listdir("./models"))
+    print("=" * 50)
 
 
-# Run setup
+# Run setup before loading
 setup_models()
 
 
-# ── Load Models ────────────────────────────────────────
+# ── Load All Models ────────────────────────────────────
 models = {}
+print("Loading models into memory...")
 
-print(f"Loading models on {DEVICE}...")
-
+# Load BERT
 try:
-    models["bert_tokenizer"] = BertTokenizer.from_pretrained("./models/bert")
-    models["bert"]           = BertForSequenceClassification.from_pretrained("./models/bert").to(DEVICE).eval()
-    print("BERT loaded successfully.")
+    bert_path = "./models/bert"
+    if os.path.exists(os.path.join(bert_path, "config.json")):
+        models["bert_tokenizer"] = BertTokenizer.from_pretrained(bert_path)
+        models["bert"]           = BertForSequenceClassification.from_pretrained(bert_path).to(DEVICE).eval()
+        print("BERT loaded successfully.")
+    else:
+        print("BERT model folder not found.")
 except Exception as e:
-    print(f"BERT failed: {e}")
+    print(f"BERT failed : {e}")
 
+# Load RoBERTa
 try:
-    models["roberta_tokenizer"] = RobertaTokenizer.from_pretrained("./models/roberta")
-    models["roberta"]           = RobertaForSequenceClassification.from_pretrained("./models/roberta").to(DEVICE).eval()
-    print("RoBERTa loaded successfully.")
+    rob_path = "./models/roberta"
+    if os.path.exists(os.path.join(rob_path, "config.json")):
+        models["roberta_tokenizer"] = RobertaTokenizer.from_pretrained(rob_path)
+        models["roberta"]           = RobertaForSequenceClassification.from_pretrained(rob_path).to(DEVICE).eval()
+        print("RoBERTa loaded successfully.")
+    else:
+        print("RoBERTa model folder not found.")
 except Exception as e:
-    print(f"RoBERTa failed: {e}")
+    print(f"RoBERTa failed : {e}")
 
+# Load CNN
 try:
-    ckpt = torch.load("./models/cnn_best.pt", map_location=DEVICE, weights_only=False)
-    cnn  = PhishingCNN(vocab_size=ckpt.get("vocab_size", VOCAB_SIZE))
-    cnn.load_state_dict(ckpt["model_state"])
-    models["cnn"]         = cnn.to(DEVICE).eval()
-    models["char_to_idx"] = ckpt.get("char_to_idx", char_to_idx)
-    print("CNN loaded successfully.")
+    cnn_path = "./models/cnn_best.pt"
+    if os.path.exists(cnn_path):
+        ckpt = torch.load(cnn_path, map_location=DEVICE, weights_only=False)
+        cnn  = PhishingCNN(vocab_size=ckpt.get("vocab_size", VOCAB_SIZE))
+        cnn.load_state_dict(ckpt["model_state"])
+        models["cnn"]         = cnn.to(DEVICE).eval()
+        models["char_to_idx"] = ckpt.get("char_to_idx", char_to_idx)
+        print("CNN loaded successfully.")
+    else:
+        print("CNN model file not found.")
 except Exception as e:
-    print(f"CNN failed: {e}")
+    print(f"CNN failed : {e}")
 
+# Load GNN
 try:
-    if GNN_AVAILABLE:
-        ckpt = torch.load("./models/gnn_best.pt", map_location=DEVICE, weights_only=False)
+    gnn_path = "./models/gnn_best.pt"
+    if GNN_AVAILABLE and os.path.exists(gnn_path):
+        ckpt = torch.load(gnn_path, map_location=DEVICE, weights_only=False)
         gnn  = PhishingGNN(
             ckpt.get("num_features", NUM_FEATURES),
-            ckpt.get("hidden_dim", 128),
-            ckpt.get("num_classes", 2),
-            ckpt.get("dropout", 0.3)
+            ckpt.get("hidden_dim",   128),
+            ckpt.get("num_classes",  2),
+            ckpt.get("dropout",      0.3)
         )
         gnn.load_state_dict(ckpt["model_state"])
         models["gnn"]    = gnn.to(DEVICE).eval()
         models["scaler"] = ckpt["scaler"]
         print("GNN loaded successfully.")
+    else:
+        print("GNN model file not found or GNN not available.")
 except Exception as e:
-    print(f"GNN failed: {e}")
+    print(f"GNN failed : {e}")
 
+# Load Scaler
 try:
     if "scaler" not in models:
-        with open("./models/scaler.pkl", "rb") as f:
-            models["scaler"] = pickle.load(f)
-        print("Scaler loaded.")
+        scaler_path = "./models/scaler.pkl"
+        if os.path.exists(scaler_path):
+            with open(scaler_path, "rb") as f:
+                models["scaler"] = pickle.load(f)
+            print("Scaler loaded successfully.")
 except Exception as e:
-    print(f"Scaler failed: {e}")
+    print(f"Scaler failed : {e}")
 
+# Load Fusion
 try:
-    with open("./models/fusion_model.pkl", "rb") as f:
-        models["fusion"] = pickle.load(f)
-    print("Fusion loaded successfully.")
+    fusion_path = "./models/fusion_model.pkl"
+    if os.path.exists(fusion_path):
+        with open(fusion_path, "rb") as f:
+            models["fusion"] = pickle.load(f)
+        print("Fusion loaded successfully.")
+    else:
+        print("fusion_model.pkl not found.")
 except Exception as e:
-    print(f"Fusion failed: {e}")
+    print(f"Fusion failed : {e}")
+
+# Load char_to_idx
+try:
+    if "char_to_idx" not in models:
+        cidx_path = "./models/char_to_idx.pkl"
+        if os.path.exists(cidx_path):
+            with open(cidx_path, "rb") as f:
+                models["char_to_idx"] = pickle.load(f)
+            print("char_to_idx loaded successfully.")
+except Exception as e:
+    print(f"char_to_idx failed : {e}")
 
 loaded = [k for k in models if not k.endswith("tokenizer") and not k.endswith("_to_idx")]
-print(f"All models ready: {loaded}")
+print(f"All models ready : {loaded}")
 
 
 # ── Prediction Functions ───────────────────────────────
@@ -489,11 +540,11 @@ def pb(url):
         with torch.no_grad():
             return torch.softmax(
                 models["bert"](
-                    input_ids=enc["input_ids"].to(DEVICE),
-                    attention_mask=enc["attention_mask"].to(DEVICE)
+                    input_ids      = enc["input_ids"].to(DEVICE),
+                    attention_mask = enc["attention_mask"].to(DEVICE)
                 ).logits, dim=1
             )[0][1].item()
-    except:
+    except Exception:
         return 0.5
 
 
@@ -508,11 +559,11 @@ def pr(url):
         with torch.no_grad():
             return torch.softmax(
                 models["roberta"](
-                    input_ids=enc["input_ids"].to(DEVICE),
-                    attention_mask=enc["attention_mask"].to(DEVICE)
+                    input_ids      = enc["input_ids"].to(DEVICE),
+                    attention_mask = enc["attention_mask"].to(DEVICE)
                 ).logits, dim=1
             )[0][1].item()
-    except:
+    except Exception:
         return 0.5
 
 
@@ -528,7 +579,7 @@ def pc(url):
                 models["cnn"](torch.tensor([enc], dtype=torch.long).to(DEVICE)),
                 dim=1
             )[0][1].item()
-    except:
+    except Exception:
         return 0.5
 
 
@@ -541,7 +592,7 @@ def pg(url):
         ei = torch.tensor([[0], [0]], dtype=torch.long).to(DEVICE)
         with torch.no_grad():
             return torch.softmax(models["gnn"](x, ei), dim=1)[0][1].item()
-    except:
+    except Exception:
         return 0.5
 
 
@@ -550,11 +601,11 @@ def pf(b, r, c, g):
         return float(np.mean([b, r, c, g]))
     try:
         return float(models["fusion"].predict_proba(np.array([[b, r, c, g]]))[0][1])
-    except:
+    except Exception:
         return float(np.mean([b, r, c, g]))
 
 
-# ── Request Models ─────────────────────────────────────
+# ── Request / Response Models ──────────────────────────
 class ScanRequest(BaseModel):
     url: str
 
@@ -575,6 +626,7 @@ def root():
     loaded = [k for k in models if not k.endswith("tokenizer") and not k.endswith("_to_idx")]
     return {
         "message" : "AdaptiveShield Phishing Detection API",
+        "version" : "1.0.0",
         "status"  : "running",
         "models"  : loaded,
         "device"  : str(DEVICE)
@@ -597,10 +649,10 @@ def scan_url(request: ScanRequest):
     if not url:
         raise HTTPException(status_code=400, detail="URL cannot be empty.")
 
-    start   = time.time()
+    start      = time.time()
     b, r, c, g = pb(url), pr(url), pc(url), pg(url)
-    fp      = pf(b, r, c, g)
-    extra   = analyze_extra(url)
+    fp         = pf(b, r, c, g)
+    extra      = analyze_extra(url)
 
     boost = 0.0
     if extra["typosquatting_detected"] and extra["typo_distance"] == 1:

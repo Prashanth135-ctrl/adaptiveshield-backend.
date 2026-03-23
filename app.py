@@ -182,17 +182,54 @@ models = {}
 
 def download_from_drive(file_id, dest_path):
     if os.path.exists(dest_path):
-        print(f"Already exists: {dest_path}")
-        return True
-    url = f"https://drive.google.com/uc?export=download&id={file_id}&confirm=t"
-    print(f"Downloading to {dest_path}...")
-    try:
-        urllib.request.urlretrieve(url, dest_path)
-        print(f"Downloaded: {dest_path}")
-        return True
-    except Exception as e:
-        print(f"Failed: {e}")
+        size = os.path.getsize(dest_path)
+        if size > 1024 * 1024:
+            print(f"Already exists: {dest_path} ({size/1024/1024:.1f} MB)")
+            return True
+        else:
+            os.remove(dest_path)
+
+    import requests
+    print(f"Downloading {dest_path}...")
+
+    session = requests.Session()
+
+    # First request to get confirmation token for large files
+    url     = f"https://drive.google.com/uc?export=download&id={file_id}"
+    resp    = session.get(url, stream=True)
+
+    # Check if Google is asking for confirmation
+    token = None
+    for key, value in resp.cookies.items():
+        if key.startswith("download_warning"):
+            token = value
+            break
+
+    # If confirmation needed get the actual file
+    if token:
+        url  = f"https://drive.google.com/uc?export=download&id={file_id}&confirm={token}"
+        resp = session.get(url, stream=True)
+
+    # Also try the new Google Drive download format
+    if resp.status_code != 200 or len(resp.content) < 1024 * 100:
+        url  = f"https://drive.usercontent.google.com/download?id={file_id}&export=download&confirm=t"
+        resp = session.get(url, stream=True)
+
+    # Write file in chunks
+    with open(dest_path, "wb") as f:
+        for chunk in resp.iter_content(chunk_size=32768):
+            if chunk:
+                f.write(chunk)
+
+    size = os.path.getsize(dest_path)
+    print(f"Downloaded: {dest_path} ({size/1024/1024:.1f} MB)")
+
+    if size < 1024 * 100:
+        print(f"WARNING: File too small ({size} bytes). May be a Google Drive error page.")
+        os.remove(dest_path)
         return False
+
+    return True
 
 def extract_transformer(zip_path, target_path):
     if os.path.exists(f"{target_path}/config.json"):
